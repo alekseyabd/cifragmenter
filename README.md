@@ -10,6 +10,16 @@ CIFragmenter — алгоритм для автоматизированной ф
 4. Запустите установку
 
 ```python
-def hello():
-    print("./cifragmenter setup")
+./cifragmenter setup
 ```
+
+## Использование
+1. В папку проекта добавьте папку, содержащую cif файлы
+2. Запустите фрагментацию командой
+
+```python
+./cifragmenter run <input_dir> --fragment-type <coord/mols>
+```
+<input_dir> - имя папки с cif файлами
+<coord/mols> - режим фрагментации: поиск «уникальных молекул» (mols) или «лигандов с разрывом координационных связей» (coord)
+
