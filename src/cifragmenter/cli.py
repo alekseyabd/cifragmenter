@@ -3,7 +3,10 @@ from __future__ import annotations
 from pathlib import Path
 import typer
 
+import os
+
 from .logging_conf import setup_logging
+from .logging_conf import setup_logger
 from .runner import run as run_job
 
 app = typer.Typer(add_completion=False)
@@ -41,9 +44,16 @@ def run(
         3000,
         "--timeout",
         help="Maximum file processing time"
+    ),
+    n_jobs: int = typer.Option(
+        os.cpu_count()-1,
+        "--n_jobs",
+        help="Number of processor cores"
     )
 ):
-    setup_logging(log_level)
+    #setup_logging(log_level)
+    #logger = setup_logger('my_service', 'service.log')
+    #logger.info('Сервис запущен')
     code = run_job(
     	input_file=input_file,
         ccdc_chemical_name_systematic=ccdc_chemical_name_systematic,
@@ -51,7 +61,9 @@ def run(
         min_occ=min_occ,
         fragment_type=fragment_type,
         property=property,
-        TIMEOUT=timeout)
+        TIMEOUT=timeout,
+        n_jobs=n_jobs,
+        log_level=log_level)
     raise typer.Exit(code=code)
 
 if __name__ == "__main__":

@@ -60,13 +60,11 @@ from rich import print
 from rich.table import Table
 from rich.progress import track
 
-from concurrent.futures import ProcessPoolExecutor, as_completed
 
 PROJECT_ROOT = Path.cwd()
 
 log = logging.getLogger("cifragmenter")
 from .logging_conf import setup_logger
-from .logging_conf import setup_logging
 import traceback
 logger = setup_logger('logfile', 'logfile.log')
 
@@ -84,10 +82,9 @@ def get_species_element(site):
         return elem
 
 def get_voronoi_polyhedron_angles(structure, metal_index, cutoff=10.0):
-    #elements=[Element('N'),Element('O'),Element('Cl'),Element('S'), Element('P'), Element('C'), Element('Se'), Element('F'), Element('Br'), Element('I'), Element('Si'), Element('B')]
-    elements = ['N','O','Cl','S','P','C','Se','F','Br','I','Si','B']
+    elements=[Element('N'),Element('O'),Element('Cl'),Element('S'), Element('P'), Element('C'), Element('Se'), Element('F'), Element('Br'), Element('I'), Element('Si'), Element('B')]
     #vnn = VoronoiNN(cutoff=cutoff, compute_adj_neighbors=False, tol=0.3, targets=elements)
-    vnn = VoronoiNN(cutoff=cutoff, compute_adj_neighbors=False, tol=0.3)
+    vnn = VoronoiNN(cutoff=cutoff, compute_adj_neighbors=False)
     nn_info = vnn.get_nn_info(structure, metal_index)
 
     poly_info = vnn.get_voronoi_polyhedra(structure, metal_index)
@@ -100,10 +97,10 @@ def get_voronoi_polyhedron_angles(structure, metal_index, cutoff=10.0):
         if site_index >= len(structure):
             continue
         elem = get_species_element(structure[site_index])
-        if structure[site_index].label in polyelements and str(elem) in elements:
-            #if neighbor['poly_info']['face_dist']*2 < 3:
-            angle = neighbor['poly_info']['solid_angle']
-            neighbor_angles[site_index] = str((angle*100)/(4*3.14))+'_'+str(neighbor['poly_info']['face_dist']*2)
+        if structure[site_index].label in polyelements and structure[site_index].specie in elements:
+            if neighbor['poly_info']['face_dist']*2 < 3:
+                angle = neighbor['poly_info']['solid_angle']
+                neighbor_angles[site_index] = str((angle*100)/(4*3.14))+'_'+str(neighbor['poly_info']['face_dist']*2)
     return neighbor_angles, total_volume
 
 def extract_submolecule(mol, indices):
@@ -168,50 +165,32 @@ def molgraph_to_rdkit(mol_graph, ligand):
             return None
         
 def remove_duplicates_and_substructures(all_molecules, cif_name, db_code, chemical_name_systematic, property,first_name):
-    try:
-        rows = []
-        for num, mol in enumerate(all_molecules):
-            smiles = Chem.MolToSmiles(mol, kekuleSmiles=True, canonical=True)
-            name = f"db_code: {db_code} / cif: {cif_name} / num: {num} / name: {chemical_name_systematic} / smiles: {smiles} / property: {property}"
-            mol.SetProp("_Name",name)
-            mol.SetProp("cif_name",cif_name)
-            mol.SetProp("compound_name",chemical_name_systematic)
-            mol.SetProp("property", property)
-            rows.append({
-                "cif_name": first_name,
-                "mol": mol,
-                "smiles": smiles,
-                "NumAt": mol.GetNumHeavyAtoms(),
-                "db_code": db_code,
-                "chemical_name_systematic": chemical_name_systematic,
-                "property": property,
-            })
-        
-        df = pd.DataFrame(rows)
-        
-        df = df.sort_values('NumAt', ascending=False, ignore_index=True)
-        df = df.drop_duplicates(subset=['smiles','cif_name'], keep='first').reset_index(drop=True)
-        mols = df["mol"].tolist()
-        patterns = []
-
-        for mol in mols:
-            mol_no_h = Chem.RemoveHs(mol, sanitize=False)
-            smarts = Chem.MolToSmarts(mol_no_h)
-            patterns.append(Chem.MolFromSmarts(smarts))
-
-        keep = [True] * len(mols)
-        for i in range(1, len(mols)):
-            patt = patterns[i]
-            for large_mol in mols[:i]:
-                if large_mol.HasSubstructMatch(patt):
-                    keep[i] = False
-                    break
-
-        df = df.loc[keep].reset_index(drop=True)
-        return(df)
-    except:
-        df = pd.DataFrame(columns=["cif_name", "mol", "smiles", "NumAt"])
-        return(df)
+    df = pd.DataFrame(columns=["cif_name", "mol", "smiles", "NumAt"])
+    for num,i in enumerate(all_molecules):
+        smiles = Chem.MolToSmiles(i, kekuleSmiles=True, canonical=True)
+        NumAtoms = i.GetNumHeavyAtoms()
+        name = f"db_code: {db_code} / cif: {cif_name} / num: {num} / name: {chemical_name_systematic} / smiles: {smiles} / property: {property}"
+        i.SetProp("_Name",name)
+        i.SetProp("cif_name",cif_name)
+        i.SetProp("compound_name",chemical_name_systematic)
+        i.SetProp("property", property)
+        new_row = pd.DataFrame([{"cif_name": first_name, "mol": i, "smiles": smiles, "NumAt": NumAtoms, "db_code": db_code, "chemical_name_systematic": chemical_name_systematic, "property": property}])
+        df = pd.concat([df, new_row], ignore_index=True)
+    
+    df = df.sort_values('NumAt', ascending=False, ignore_index=True)
+    df = df.drop_duplicates(subset=['smiles','cif_name'], keep='first').reset_index(drop=True)
+    idx_for_del = []
+    for row in df.itertuples():
+        if row.Index > 0:
+            mol_remove_H = Chem.RemoveHs(row.mol, sanitize=False)
+            smarts = Chem.MolToSmarts(mol_remove_H)
+            search_pattern = Chem.MolFromSmarts(smarts)
+            for n,larg_mol in enumerate(df['mol'][0:row.Index]):
+                if larg_mol.HasSubstructMatch(search_pattern):
+                    idx_for_del.append(row.Index)
+    indices_to_drop = list(set(idx_for_del))
+    df_end = df.drop(indices_to_drop)
+    return(df_end)
 
 def serach_name_ccdc(file_name,ccdc_chemical_name_systematic,db_code_pattern,property):
     lines = []
@@ -243,14 +222,18 @@ def serach_name_ccdc(file_name,ccdc_chemical_name_systematic,db_code_pattern,pro
 
 def OpenBabelToMolGraph(file_name, xyz_lines,species,coords,supercell):
     try:
-        xyz_text = "\n".join(xyz_lines)
-        ob_mol = pybel.readstring("xyz", xyz_text)
+        xyz_file_path = str(file_name).split('.')[0]+'.xyz'
+        with open(xyz_file_path, "w") as fname:
+            fname.write("\n".join(xyz_lines))
+        ob_mol = next(pybel.readfile("xyz", xyz_file_path))
         bonds = {}
         for bond in pybel.ob.OBMolBondIter(ob_mol.OBMol):
             i = bond.GetBeginAtomIdx() - 1
             j = bond.GetEndAtomIdx() - 1
             bonds[(i, j)] = None
 
+        file_path = Path(xyz_file_path)
+        file_path.unlink()
         molecule = Molecule(species, coords)
         if hasattr(supercell, 'site_properties') and 'metals' in supercell.site_properties:
             molecule.add_site_property("metals", supercell.site_properties["metals"])
@@ -289,22 +272,6 @@ def OpenBabelToMolGraph(file_name, xyz_lines,species,coords,supercell):
             fragment_graphs = []
         return(fragment_graphs)
 
-def remove_low_occupancy_sites(structure, threshold=0.5):
-    """
-    Удаляет сайты с суммарным occupancy ниже порога
-    """
-    filtered_sites = []
-    for site in structure.sites:
-        occu = site.species.as_dict()[list(site.species.as_dict().keys())[0]]
-        # Получаем суммарную занятость сайта
-        total_occupancy = occu
-        
-        if total_occupancy >= threshold:
-            filtered_sites.append(site)
-    
-    new_structure = Structure.from_sites(filtered_sites)
-    return new_structure
-
 def cif_to_mols(file_name, first_name, ccdc_chemical_name_systematic, db_code_pattern, min_occ,fragment_type,property):
     chemical_name_systematic,db_code,db_property = serach_name_ccdc(file_name,ccdc_chemical_name_systematic,db_code_pattern,property)
     
@@ -315,15 +282,12 @@ def cif_to_mols(file_name, first_name, ccdc_chemical_name_systematic, db_code_pa
 
         if fragment_type == 'coord':
             for num,i in enumerate(struct):
-                
                 site = str(i)
                 pattern = r"\] ([a-zA-Z]+)"
                 match = re.search(pattern, site)
                 if(Element(match.group(1)).is_metal):
-                    #if i.is_ordered == False:
-                        #filtered_mols = []
-                        #return(filtered_mols)
                     struct[num].properties['metall'] = num
+            supercell = struct.make_supercell(2,2,2)
             SA=[0 for x in range(len(supercell))]
             Dist=[0 for x in range(len(supercell))]
             Met=[0 for x in range(len(supercell))]
@@ -336,9 +300,6 @@ def cif_to_mols(file_name, first_name, ccdc_chemical_name_systematic, db_code_pa
                     metal_symbol = elem
                     neighbor_angles, poly_volume = get_voronoi_polyhedron_angles(supercell, i)
                     for nbr_idx, angle in neighbor_angles.items():
-                        if supercell[nbr_idx].is_ordered == False:
-                            filtered_mols = []
-                            return(filtered_mols)
                         donor_atom = get_species_element(supercell[nbr_idx])
                         label = f"{metal_symbol}_{angle}_{poly_volume}"
                         if nbr_idx not in donor_labels:
@@ -380,7 +341,7 @@ def cif_to_mols(file_name, first_name, ccdc_chemical_name_systematic, db_code_pa
             nonmetal_structure.add_site_property("distances", new_distances)
             nonmetal_structure.add_site_property("poly_volumes", new_volumes)
             supercell = nonmetal_structure
-        supercell = remove_low_occupancy_sites(supercell)
+
         xyz_lines = [""]
         species = []
         coords = []
@@ -428,102 +389,6 @@ class TimeoutException(Exception):
 def timeout_handler(signum, frame):
     raise TimeoutException
 
-def process_one_cif(args):
-    (
-        cif_path,
-        ccdc_chemical_name_systematic,
-        db_code_pattern,
-        min_occ,
-        fragment_type,
-        property,
-        TIMEOUT,
-        log_level
-    ) = args
-
-    setup_logging(log_level)
-
-    cif_path = Path(cif_path)
-
-    try:
-        signal.signal(signal.SIGALRM, timeout_handler)
-        signal.alarm(TIMEOUT)
-
-        cif_to_mols_res = cif_to_mols(
-            str(cif_path),
-            cif_path.name,
-            ccdc_chemical_name_systematic,
-            db_code_pattern,
-            min_occ,
-            fragment_type,
-            property,
-        )
-
-        signal.alarm(0)
-
-        if isinstance(cif_to_mols_res, str) and cif_to_mols_res == "TimeoutException":
-            return {
-                "status": "timeout",
-                "cif_name": cif_path.name,
-                "cif_path": str(cif_path),
-                "serialized_mols": [],
-            }
-
-        if len(cif_to_mols_res) == 0:
-            return {
-                "status": "error",
-                "cif_name": cif_path.name,
-                "cif_path": str(cif_path),
-                "serialized_mols": [],
-            }
-
-        serialized_mols = []
-        for mol in cif_to_mols_res["mol"]:
-            if mol is None:
-                continue
-            
-            try:
-                rdDetermineBonds.DetermineBondOrders(mol)
-                Chem.SanitizeMol(mol)
-            except:
-                Chem.SanitizeMol(mol)
-
-            mol_block = Chem.MolToMolBlock(mol)
-            
-            props = {}
-            for prop_name in mol.GetPropNames(includePrivate=True):
-                props[prop_name] = mol.GetProp(prop_name)
-
-            serialized_mols.append({
-                "mol_block": mol_block,
-                "props": props,
-            })
-
-        return {
-            "status": "ok",
-            "cif_name": cif_path.name,
-            "cif_path": str(cif_path),
-            "serialized_mols": serialized_mols,
-        }
-
-    except TimeoutException:
-        signal.alarm(0)
-        return {
-            "status": "timeout",
-            "cif_name": cif_path.name,
-            "cif_path": str(cif_path),
-            "serialized_mols": [],
-        }
-
-    except Exception:
-        signal.alarm(0)
-        logger.info(traceback.format_exc())
-        return {
-            "status": "error",
-            "cif_name": cif_path.name,
-            "cif_path": str(cif_path),
-            "serialized_mols": [],
-        }
-
 def run(
     input_file: Path,
     ccdc_chemical_name_systematic: str = "_chemical_name_systematic",
@@ -531,9 +396,7 @@ def run(
     min_occ: float = 0.5,
     fragment_type: str = "coord",
     property: str = "meelting_point",
-    TIMEOUT: int = 3000,
-    n_jobs: int | None = None,
-    log_level: str = "INFO"
+    TIMEOUT: int = 3000
     ) -> int:
     logger.info('Сервис запущен')
 
@@ -542,108 +405,64 @@ def run(
         return 2
 
     print(f"[blue]Запуск CiFragmenter в папке [bold]{input_file}[/bold][/blue]")
-
+    
+    cif_files = list(Path(input_file).glob("*.cif"))
     filtered_mols = []
     processed = 0
     input_dir = Path(input_file)
-
     done_dir = input_dir / "done"
     done_dir.mkdir(exist_ok=True)
-
     error_dir = input_dir / "error"
     error_dir.mkdir(exist_ok=True)
-
     mol_dir = input_dir / "mols"
     mol_dir.mkdir(exist_ok=True)
-
     timeout_dir = input_dir / "timeout"
     timeout_dir.mkdir(exist_ok=True)
 
+    signal.signal(signal.SIGALRM, timeout_handler)
     num_long_time_files = 0
-    er_cifs = []
+    er_cifs=[]
     num_ok_cifs = 0
     num_error_cifs = 0
-
-    cif_files = sorted(input_dir.glob("*.cif"))
     total = len(cif_files)
-
-    if n_jobs is None:
-        cpu_count = os.cpu_count() or 1
-        n_jobs = max(1, cpu_count - 1)
-
-    tasks = [
-        (
-            str(cif),
-            ccdc_chemical_name_systematic,
-            db_code_pattern,
-            min_occ,
-            fragment_type,
-            property,
-            TIMEOUT,
-            log_level
-        )
-        for cif in cif_files
-    ]
-
-    with ProcessPoolExecutor(max_workers=n_jobs) as executor:
-        future_to_cif = {
-            executor.submit(process_one_cif, task): Path(task[0])
-            for task in tasks
-        }
-
-        for future in track(
-            as_completed(future_to_cif),
-            total=len(future_to_cif),
-            description="Фрагментация..."
-        ):
-            cif_path = future_to_cif[future]
-            cif_name = cif_path.name
-
-            try:
-                result = future.result()
-            except Exception:
-                logger.info(traceback.format_exc())
-                num_error_cifs += 1
-                er_cifs.append(cif_name)
-                if cif_path.exists():
-                    shutil.move(str(cif_path), str(error_dir / cif_name))
-                processed += 1
-                continue
-
-            if result["status"] == "timeout":
-                num_long_time_files += 1
-                if cif_path.exists():
-                    shutil.move(str(cif_path), str(timeout_dir / cif_name))
-                processed += 1
-                continue
-
-            if result["status"] == "error":
-                er_cifs.append(cif_name)
-                num_error_cifs += 1
-                if cif_path.exists():
-                    shutil.move(str(cif_path), str(error_dir / cif_name))
-                processed += 1
-                continue
-
+    
+    cif_files = sorted(input_dir.glob("*.cif"))  
+    for cif in track(cif_files, description="Фрагментация..."):
+        cif_path = input_dir / cif.name
+        try:
+            signal.alarm(TIMEOUT)
+            cif_to_mols_res = cif_to_mols(str(input_file)+'/'+cif.name, cif.name, ccdc_chemical_name_systematic, db_code_pattern, min_occ,fragment_type,property)
+        except TimeoutException:
+            signal.alarm(0)
+            num_long_time_files += 1
+            shutil.move(str(cif_path), str(timeout_dir / cif.name))
+            continue
+        finally:
+            signal.alarm(0)
+        if type(cif_to_mols_res) == str and cif_to_mols_res == "TimeoutException":
+            num_long_time_files += 1
+            shutil.move(str(cif_path), str(timeout_dir / cif.name))
+            continue
+        if len(cif_to_mols_res) == 0:
+            er_cifs.append(cif.name)
+            num_error_cifs += 1
+            shutil.move(str(cif_path), str(error_dir / cif.name))
+        else:
+            if len(filtered_mols) == 0:
+                filtered_mols = cif_to_mols_res
+            else:
+                filtered_mols = pd.concat([filtered_mols, cif_to_mols_res], ignore_index=True)
             num_ok_cifs += 1
-            if cif_path.exists():
-                shutil.move(str(cif_path), str(done_dir / cif_name))
-
-            for i, item in enumerate(result["serialized_mols"], start=1):
-                mol = Chem.MolFromMolBlock(item["mol_block"], removeHs=False)
+            shutil.move(str(cif_path), str(done_dir / cif.name))
+            for i, mol in enumerate(cif_to_mols_res["mol"], start=1):
                 if mol is None:
                     continue
-
-                for prop_name, prop_value in item["props"].items():
-                    mol.SetProp(prop_name, str(prop_value))
-
-                w = Chem.SDWriter(str(mol_dir / f"{cif_path.stem}_{i}.sdf"))
+                w = Chem.SDWriter(str(mol_dir / f"{cif.stem}_{i}.sdf"))
                 w.write(mol)
                 w.close()
+        processed += 1
 
-            processed += 1
-
-    output_sdf = input_dir / "SDF.sdf"
+    output_sdf = input_dir / "SDF.sdf"     
     writer = Chem.SDWriter(str(output_sdf))
     for sdf_file in sorted(mol_dir.glob("*.sdf")):
         supplier = Chem.SDMolSupplier(str(sdf_file), removeHs=False)
@@ -652,29 +471,15 @@ def run(
                 continue
             writer.write(mol)
     writer.close()
-
+        
     table = Table(title="Результаты")
     table.add_column("Всего cif")
     table.add_column("Успешно")
     table.add_column("Ошибка (пропущено)")
     table.add_column("Долго (пропущено)")
     table.add_column("Найдено фрагментов")
-
-    table.add_row(
-        str(total),
-        str(num_ok_cifs),
-        str(num_error_cifs),
-        str(num_long_time_files),
-        str(len(list(mol_dir.glob("*.sdf"))))
-    )
-    table.add_row(
-        "Перемещены",
-        str(input_file) + "/done",
-        str(input_file) + "/error",
-        str(input_file) + "/timeout",
-        str(output_sdf)
-    )
-
+    table.add_row(str(total),str(num_ok_cifs),str(num_error_cifs),str(num_long_time_files),str(len(list(mol_dir.glob("*.sdf")))))
+    table.add_row("Перемещены",str(input_file)+"/done",str(input_file)+"/error",str(input_file)+"/timeout",str(output_sdf))
     print(table)
     print("[green]Готово[/green]")
     return 0
