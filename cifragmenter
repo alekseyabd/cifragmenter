@@ -52,6 +52,9 @@ case "$cmd" in
 
     "$PY" -m pip install --upgrade pip
 
+    # Установка SWIG
+    command -v swig >/dev/null 2>&1 || { echo "Установка SWIG..."; brew install swig; }
+
     "$PIP" install numpy scipy matplotlib
     "$PIP" install pymatgen
     "$PIP" install cmake
@@ -82,11 +85,27 @@ case "$cmd" in
   	"$PIP" install -U pip setuptools wheel 
 
     make -j"$(getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)"
-    make install
+     make install
 
+    # Ищем и копируем Python модули
+    SP="$(ob_site_packages)"
+    mkdir -p "$SP"
+    
+    # Копируем .so файлы из build директории
+    find "$OB_BUILD_DIR" -name "_openbabel*.so" -exec cp {} "$SP/" \; 2>/dev/null || true
+    find "$OB_BUILD_DIR" -name "openbabel*.py" -exec cp {} "$SP/" \; 2>/dev/null || true
+    
+    # Если не нашли, пробуем из исходников
+    if [[ ! -f "$SP"/*openbabel* ]]; then
+        if [[ -d "$OB_SRC_DIR/scripts/python/openbabel" ]]; then
+            cp -r "$OB_SRC_DIR/scripts/python/openbabel" "$SP/"
+        fi
+        if [[ -d "$OB_SRC_DIR/scripts/python/pybel.py" ]]; then
+            cp "$OB_SRC_DIR/scripts/python/pybel.py" "$SP/"
+        fi
+    fi
+    
     cd "$PROJECT_ROOT"
-
-    "$PIP" install openbabel
 
     SP="$(ob_site_packages)"
     cat > "$PROJECT_ROOT/.cifragmenter.env" <<EOF
