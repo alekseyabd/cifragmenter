@@ -23,6 +23,7 @@ def setup_logging(level: str):
 
     RDLogger.DisableLog("rdApp.warning")
     RDLogger.DisableLog("rdApp.error")
+    RDLogger.DisableLog("rdApp.info")
 
     try:
         from openbabel import openbabel as ob

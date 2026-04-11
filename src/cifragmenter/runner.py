@@ -47,6 +47,7 @@ from rdkit.Chem import Descriptors, Draw
 from rdkit.Chem import rdDetermineBonds
 from rdkit import DataStructs
 from rdkit.Chem import rdMolDescriptors
+from rdkit.Chem import rdFMCS
 from copy import deepcopy
 
 import networkx as nx
@@ -167,51 +168,139 @@ def molgraph_to_rdkit(mol_graph, ligand):
         except:
             return None
         
-def remove_duplicates_and_substructures(all_molecules, cif_name, db_code, chemical_name_systematic, property,first_name):
-    try:
-        rows = []
-        for num, mol in enumerate(all_molecules):
-            smiles = Chem.MolToSmiles(mol, kekuleSmiles=True, canonical=True)
-            name = f"db_code: {db_code} / cif: {cif_name} / num: {num} / name: {chemical_name_systematic} / smiles: {smiles} / property: {property}"
-            mol.SetProp("_Name",name)
-            mol.SetProp("cif_name",cif_name)
-            mol.SetProp("compound_name",chemical_name_systematic)
-            mol.SetProp("property", property)
-            rows.append({
-                "cif_name": first_name,
-                "mol": mol,
-                "smiles": smiles,
-                "NumAt": mol.GetNumHeavyAtoms(),
-                "db_code": db_code,
-                "chemical_name_systematic": chemical_name_systematic,
-                "property": property,
-            })
+    
+def remove_duplicates_and_substructures(mol_list, chem_uniq, fragment_type, cif_name, db_code, chemical_name_systematic, property):
+    records = []
+    
+    for mol in mol_list:
+        if mol is None:
+            continue
         
-        df = pd.DataFrame(rows)
-        
-        df = df.sort_values('NumAt', ascending=False, ignore_index=True)
-        df = df.drop_duplicates(subset=['smiles','cif_name'], keep='first').reset_index(drop=True)
-        mols = df["mol"].tolist()
-        patterns = []
-
-        for mol in mols:
+        smiles = Chem.MolToSmiles(mol, kekuleSmiles=True, canonical=True)
+        mol.SetProp("cif_name",cif_name)
+        mol.SetProp("db_code",db_code)
+        mol.SetProp("compound_name",chemical_name_systematic)
+        mol.SetProp("property", property)
+        mol.SetProp("smiles", smiles)
+        if fragment_type == 'coord':
+            SA = re.sub(r"'| ", "", mol.GetProp('SA')).replace('[],','').replace('[','').replace(']','').split(',') if mol.HasProp('SA') else None
+            SA_n = [round(float(num), 4) for num in list(filter(None, SA))]
+            count = len(list(filter(None, SA)))
+            if count>0:
+                records.append({
+                    'smiles': smiles,
+                    'SA': SA_n,
+                    'NumAtoms': mol.GetNumAtoms(),
+                    '_mol': mol  
+                })
+        else:
             mol_no_h = Chem.RemoveHs(mol, sanitize=False)
-            smarts = Chem.MolToSmarts(mol_no_h)
-            patterns.append(Chem.MolFromSmarts(smarts))
+            records.append({
+                'smiles': Chem.MolToSmiles(mol_no_h, kekuleSmiles=False, canonical=True),
+                'NumAtoms': mol_no_h.GetNumAtoms(),
+                '_mol': mol,
+                'SA': ''
+            })
+    if not records:
+        return pd.DataFrame(columns=['cif_name', 'smiles', 'SA', 'NumAtoms'])
 
-        keep = [True] * len(mols)
-        for i in range(1, len(mols)):
-            patt = patterns[i]
-            for large_mol in mols[:i]:
-                if large_mol.HasSubstructMatch(patt):
-                    keep[i] = False
-                    break
+    df = pd.DataFrame(records)
+    df = df.sort_values('NumAtoms', ascending=False, ignore_index=True)
+   
+    sa_strs = df['SA'].tolist()
+    mols = df['_mol'].tolist()
+    smiles = df['smiles'].tolist()
 
-        df = df.loc[keep].reset_index(drop=True)
-        return(df)
-    except:
-        df = pd.DataFrame(columns=["cif_name", "mol", "smiles", "NumAt"])
-        return(df)
+            
+
+    keep = [True] * len(mols)
+    for i in range(len(mols)):
+        if not keep[i]:
+            continue
+        sa_i = sa_strs[i]
+        mol_i = mols[i]
+        
+        for j in range(i + 1, len(mols)):
+            if not keep[j]:
+                continue
+            mol_no_h = Chem.RemoveHs(mols[j], sanitize=False)
+            new_mol = Chem.MolFromSmarts(rdFMCS.FindMCS((mol_i,mol_no_h), bondCompare=rdFMCS.BondCompare.CompareAny).smartsString)
+            if fragment_type == 'mols':
+                if new_mol.GetNumAtoms()==mol_no_h.GetNumAtoms():
+                    keep[j] = False
+            elif new_mol.GetNumAtoms()==mol_no_h.GetNumAtoms() and set(sa_strs[j]).issubset(sa_i):
+                keep[j] = False
+            else:
+                continue
+            
+    df = df.loc[keep].reset_index(drop=True)
+
+    if chem_uniq == 'chem' or fragment_type == 'mols':
+        grouped = df.groupby('smiles', sort=False)
+        rows_to_drop = []
+        updated_indices = []
+
+        for smiles, group in grouped:
+            if len(group) <= 1:
+                continue
+                
+            indices = group.index.tolist()
+            main_idx = indices[0]      # Первая строка (оставляем её)
+            dup_indices = indices[1:]  # Остальные строки (удаляем их)
+            
+            rows_to_drop.extend(dup_indices)
+            updated_indices.append(main_idx)
+            
+            main_mol = df.loc[main_idx, '_mol']
+            dup_mols = [df.loc[idx, '_mol'] for idx in dup_indices]
+            
+            prop_names = ['SA', 'Dist', 'Metals', 'PolyVolumes']
+            
+            for prop in prop_names:
+                all_prop_values = []
+                try:
+                    val_str = main_mol.GetProp(prop)
+                    main_list = eval(val_str) 
+                except:
+                    main_list = ['[]'] * 34 # Дефолтная длина, если свойства нет или ошибка парсинга
+                    
+                all_prop_values.append(main_list)
+                
+                for mol in dup_mols:
+                    try:
+                        val_str = mol.GetProp(prop)
+                        dup_list = eval(val_str)
+                    except:
+                        dup_list = ['[]'] * 34
+                    all_prop_values.append(dup_list)
+
+                list_len = len(all_prop_values[0])
+                
+                merged_list = []
+                for i in range(list_len):
+                    cells = [lst[i] for lst in all_prop_values]
+
+                    valid_values = []
+                    for cell in cells:
+                        if cell != '[]':
+                            content = cell.strip('[]')
+                            if content: # Если внутри что-то есть
+                                valid_values.append(content)
+                    
+                    if valid_values:
+                        merged_cell = str(valid_values)
+                    else:
+                        merged_cell = '[]'
+                    
+                    merged_list.append(merged_cell)
+                
+                new_prop_value = str(merged_list)                
+                main_mol.SetProp(prop, new_prop_value)
+
+        if rows_to_drop:
+            df = df.drop(rows_to_drop).reset_index(drop=True)
+
+    return(df)
 
 def serach_name_ccdc(file_name,ccdc_chemical_name_systematic,db_code_pattern,property):
     lines = []
@@ -305,14 +394,13 @@ def remove_low_occupancy_sites(structure, threshold=0.5):
     new_structure = Structure.from_sites(filtered_sites)
     return new_structure
 
-def cif_to_mols(file_name, first_name, ccdc_chemical_name_systematic, db_code_pattern, min_occ,fragment_type,property):
+
+def cif_to_mols(file_name, first_name, ccdc_chemical_name_systematic, db_code_pattern, min_occ,fragment_type,property,uniq_fragments):
     chemical_name_systematic,db_code,db_property = serach_name_ccdc(file_name,ccdc_chemical_name_systematic,db_code_pattern,property)
-    
     try:
         CifPars = CifParser(file_name, occupancy_tolerance=6)
         struct = CifPars.get_structures()[0]
         supercell = struct.make_supercell(2,2,2)
-
         if fragment_type == 'coord':
             for num,i in enumerate(struct):
                 
@@ -364,7 +452,7 @@ def cif_to_mols(file_name, first_name, ccdc_chemical_name_systematic, db_code_pa
                     all_solid_angles[donor_idx].append(float(sa_str))
                     all_distances[donor_idx].append(float(dist_str))
                     all_volumes[donor_idx].append(float(vol_str))
-        
+
             metal_indices = [i for i, site in enumerate(supercell) if get_species_element(site).is_metal]
             nonmetal_structure = supercell.copy()
             nonmetal_structure.remove_sites(metal_indices)
@@ -415,12 +503,13 @@ def cif_to_mols(file_name, first_name, ccdc_chemical_name_systematic, db_code_pa
                 rd_mol = molgraph_to_rdkit(frag,mol_rdkit_setting)
                 if rd_mol is not None:
                     all_molecules.append(rd_mol)
-            filtered_mols = remove_duplicates_and_substructures(all_molecules, file_name.split('/')[-1], db_code, chemical_name_systematic, db_property,first_name)
+            filtered_mols = remove_duplicates_and_substructures(all_molecules, chem_uniq=uniq_fragments, fragment_type=fragment_type, cif_name=file_name, db_code=db_code, chemical_name_systematic=chemical_name_systematic, property=db_property)
             return(filtered_mols)
-    except ValueError:
+    except Exception as e:
+        logger.info(f'❌ Не найдены фрагменты в {file_name}')
+        logger.info(traceback.format_exc())
         filtered_mols = []
-        return(filtered_mols)
-        
+        return(filtered_mols)   
 
 class TimeoutException(Exception):
     pass
@@ -437,6 +526,7 @@ def process_one_cif(args):
         fragment_type,
         property,
         TIMEOUT,
+        uniq_fragments,
         log_level
     ) = args
 
@@ -456,6 +546,7 @@ def process_one_cif(args):
             min_occ,
             fragment_type,
             property,
+            uniq_fragments
         )
 
         signal.alarm(0)
@@ -477,7 +568,7 @@ def process_one_cif(args):
             }
 
         serialized_mols = []
-        for mol in cif_to_mols_res["mol"]:
+        for mol in cif_to_mols_res["_mol"]:
             if mol is None:
                 continue
             
@@ -485,7 +576,9 @@ def process_one_cif(args):
                 rdDetermineBonds.DetermineBondOrders(mol)
                 Chem.SanitizeMol(mol)
             except:
-                Chem.SanitizeMol(mol)
+                #Chem.SanitizeMol(mol)
+                logger.info('Санитизация не прошла')
+
 
             mol_block = Chem.MolToMolBlock(mol)
             
@@ -533,6 +626,7 @@ def run(
     property: str = "meelting_point",
     TIMEOUT: int = 3000,
     n_jobs: int | None = None,
+    uniq_fragments: str = "chem",
     log_level: str = "INFO"
     ) -> int:
     logger.info('Сервис запущен')
@@ -580,6 +674,7 @@ def run(
             fragment_type,
             property,
             TIMEOUT,
+            uniq_fragments,
             log_level
         )
         for cif in cif_files
@@ -618,6 +713,7 @@ def run(
                 continue
 
             if result["status"] == "error":
+                logger.info(traceback.format_exc())
                 er_cifs.append(cif_name)
                 num_error_cifs += 1
                 if cif_path.exists():

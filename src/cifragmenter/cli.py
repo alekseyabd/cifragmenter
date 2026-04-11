@@ -49,6 +49,11 @@ def run(
         os.cpu_count()-1,
         "--n_jobs",
         help="Number of processor cores"
+    ),
+    uniq_fragments: str = typer.Option(
+        "cryst",
+        "--uniq_fragments",
+        help="Search for ligands that are crystallographically different (cryst) or chemically different (chem)"
     )
 ):
     #setup_logging(log_level)
@@ -63,6 +68,7 @@ def run(
         property=property,
         TIMEOUT=timeout,
         n_jobs=n_jobs,
+        uniq_fragments=uniq_fragments,
         log_level=log_level)
     raise typer.Exit(code=code)
 
